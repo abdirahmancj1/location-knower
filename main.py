@@ -10,15 +10,29 @@ app = Flask(__name__)
 city_reader = geoip2.database.Reader("GeoLite2-City.mmdb")
 asn_reader = geoip2.database.Reader("GeoLite2-ASN.mmdb")
 
-VPN_API_KEY = "YOUR_IPAPI_KEY"   # 👈 put your key here
+VPN_API_KEY = "YOUR_IPAPI_KEY"  # replace with your key
+
+# -------------------- HELPER FUNCTIONS --------------------
+def get_client_ip():
+    """
+    Safely get the client's real IP, even behind proxies.
+    Takes only the first IP from X-Forwarded-For
+    """
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr
 
 def is_private(ip):
-    return ipaddress.ip_address(ip).is_private
+    try:
+        return ipaddress.ip_address(ip).is_private
+    except ValueError:
+        return True
 
 # -------------------- MAIN PAGE --------------------
 @app.route("/")
 def index():
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+    ip = get_client_ip()  # ✅ use helper function
 
     country = city = isp = "Private IP"
     lat = lon = None
@@ -33,14 +47,17 @@ def index():
             city = city_res.city.name or "Unknown"
             lat = city_res.location.latitude
             lon = city_res.location.longitude
-            isp = asn_res.autonomous_system_organization
-        except:
-            pass
+            isp = asn_res.autonomous_system_organization or "Unknown"
+        except Exception as e:
+            print("GeoIP error:", e)
 
         # VPN Detection
-        r = requests.get(f"https://api.ipapi.is/?q={ip}&key={VPN_API_KEY}")
-        data = r.json()
-        vpn = "Yes" if data.get("is_vpn") else "No"
+        try:
+            r = requests.get(f"https://api.ipapi.is/?q={ip}&key={VPN_API_KEY}", timeout=5)
+            data = r.json()
+            vpn = "Yes" if data.get("is_vpn") else "No"
+        except Exception as e:
+            print("VPN API error:", e)
 
     log = {
         "time": str(datetime.now()),
@@ -63,14 +80,19 @@ def gps():
     lat = data["lat"]
     lon = data["lon"]
 
-    r = requests.get(
-        "https://nominatim.openstreetmap.org/reverse",
-        params={"lat": lat, "lon": lon, "format": "json"},
-        headers={"User-Agent": "CyberLab"}
-    )
+    try:
+        r = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "json"},
+            headers={"User-Agent": "CyberLab"},
+            timeout=5
+        )
+        address = r.json().get("display_name", "Unknown")
+    except:
+        address = "Unknown"
 
     return jsonify({
-        "address": r.json().get("display_name", "Unknown"),
+        "address": address,
         "lat": lat,
         "lon": lon
     })
