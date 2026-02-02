@@ -116,6 +116,7 @@ def admin_login():
     return render_template_string(LOGIN_PAGE, error=error)
 
 # -------------------- ADMIN --------------------
+
 @app.route("/admin")
 def admin():
     if not admin_required():
@@ -124,9 +125,18 @@ def admin():
     logs = []
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE) as f:
-            logs = [json.loads(line) for line in f.readlines()]
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    logs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    print("Skipping invalid log line:", line)
 
     return render_template_string(ADMIN_PAGE, logs=logs[::-1])
+
+
 
 # -------------------- LOGOUT --------------------
 @app.route("/admin/logout")
