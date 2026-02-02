@@ -14,10 +14,15 @@ VPN_API_KEY = "YOUR_IPAPI_KEY"
 
 ADMIN_USERNAME = "admin"
 ADMIN_PASSWORD = "password123"   # 🔴 change this
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret")
 
-city_reader = geoip2.database.Reader("GeoLite2-City.mmdb")
-asn_reader = geoip2.database.Reader("GeoLite2-ASN.mmdb")
-
+try:
+    city_reader = geoip2.database.Reader("GeoLite2-City.mmdb")
+    asn_reader = geoip2.database.Reader("GeoLite2-ASN.mmdb")
+except Exception as e:
+    city_reader = None
+    asn_reader = None
+    print("GeoIP disabled:", e)
 LOG_FILE = "access.log"
 
 # -------------------- HELPERS --------------------
