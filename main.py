@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string, jsonify, abort
+from flask import Flask, request, render_template_string, jsonify, abort, redirect, session
 from datetime import datetime
 import geoip2.database
 import ipaddress
@@ -7,10 +7,13 @@ import json
 import os
 
 app = Flask(__name__)
+app.secret_key = "CHANGE_THIS_SECRET_KEY"
 
 # -------------------- CONFIG --------------------
 VPN_API_KEY = "YOUR_IPAPI_KEY"
-ADMIN_TOKEN = "SUPER_SECRET_ADMIN_TOKEN"
+
+ADMIN_USERNAME = "admin"
+ADMIN_PASSWORD = "password123"   # 🔴 change this
 
 city_reader = geoip2.database.Reader("GeoLite2-City.mmdb")
 asn_reader = geoip2.database.Reader("GeoLite2-ASN.mmdb")
@@ -33,6 +36,11 @@ def is_private(ip):
 def log_event(data):
     with open(LOG_FILE, "a") as f:
         f.write(json.dumps(data) + "\n")
+
+def admin_required():
+    if not session.get("admin"):
+        return False
+    return True
 
 # -------------------- VISITOR --------------------
 @app.route("/visit")
@@ -73,7 +81,6 @@ def visit():
             log["vpn"] = "Unknown"
 
     log_event(log)
-
     return render_template_string(VISITOR_PAGE)
 
 # -------------------- GPS --------------------
@@ -87,11 +94,27 @@ def gps():
     })
     return jsonify({"status": "ok"})
 
+# -------------------- LOGIN --------------------
+@app.route("/admin/login", methods=["GET", "POST"])
+def admin_login():
+    error = None
+    if request.method == "POST":
+        if (
+            request.form["username"] == ADMIN_USERNAME
+            and request.form["password"] == ADMIN_PASSWORD
+        ):
+            session["admin"] = True
+            return redirect("/admin")
+        else:
+            error = "Invalid credentials"
+
+    return render_template_string(LOGIN_PAGE, error=error)
+
 # -------------------- ADMIN --------------------
 @app.route("/admin")
 def admin():
-    if request.headers.get("X-ADMIN-TOKEN") != ADMIN_TOKEN:
-        abort(403)
+    if not admin_required():
+        return redirect("/admin/login")
 
     logs = []
     if os.path.exists(LOG_FILE):
@@ -100,23 +123,28 @@ def admin():
 
     return render_template_string(ADMIN_PAGE, logs=logs[::-1])
 
+# -------------------- LOGOUT --------------------
+@app.route("/admin/logout")
+def logout():
+    session.clear()
+    return redirect("/admin/login")
+
 # -------------------- HTML --------------------
 VISITOR_PAGE = """
 <!DOCTYPE html>
 <html>
 <head><title>Welcome</title></head>
 <body>
-
 <h3>Welcome</h3>
 
 <script>
 navigator.geolocation.getCurrentPosition(pos => {
  fetch("/gps", {
-   method: "POST",
-   headers: {"Content-Type":"application/json"},
-   body: JSON.stringify({
-     lat: pos.coords.latitude,
-     lon: pos.coords.longitude
+   method:"POST",
+   headers:{"Content-Type":"application/json"},
+   body:JSON.stringify({
+     lat:pos.coords.latitude,
+     lon:pos.coords.longitude
    })
  });
 });
@@ -126,11 +154,32 @@ navigator.geolocation.getCurrentPosition(pos => {
 </html>
 """
 
+LOGIN_PAGE = """
+<!DOCTYPE html>
+<html>
+<head><title>Admin Login</title></head>
+<body>
+<h2>Admin Login</h2>
+
+{% if error %}
+<p style="color:red">{{ error }}</p>
+{% endif %}
+
+<form method="post">
+<input name="username" placeholder="Username" required><br><br>
+<input name="password" type="password" placeholder="Password" required><br><br>
+<button type="submit">Login</button>
+</form>
+
+</body>
+</html>
+"""
+
 ADMIN_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-<title>Admin</title>
+<title>Admin Dashboard</title>
 <link rel="stylesheet"
  href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -143,6 +192,7 @@ td,th{border:1px solid #ccc;padding:6px}
 
 <body>
 <h2>Admin Dashboard</h2>
+<a href="/admin/logout">Logout</a>
 <div id="map"></div>
 
 <table>
@@ -150,6 +200,7 @@ td,th{border:1px solid #ccc;padding:6px}
 <th>Time</th><th>IP</th><th>Country</th><th>City</th>
 <th>ISP</th><th>VPN</th><th>Lat</th><th>Lon</th>
 </tr>
+
 {% for l in logs %}
 <tr>
 <td>{{ l.time }}</td>
