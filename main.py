@@ -1,23 +1,24 @@
-from flask import Flask, request, render_template_string, jsonify
+from flask import Flask, request, render_template_string, jsonify, abort
 from datetime import datetime
 import geoip2.database
 import ipaddress
 import requests
 import json
+import os
 
 app = Flask(__name__)
+
+# -------------------- CONFIG --------------------
+VPN_API_KEY = "YOUR_IPAPI_KEY"
+ADMIN_TOKEN = "SUPER_SECRET_ADMIN_TOKEN"
 
 city_reader = geoip2.database.Reader("GeoLite2-City.mmdb")
 asn_reader = geoip2.database.Reader("GeoLite2-ASN.mmdb")
 
-VPN_API_KEY = "YOUR_IPAPI_KEY"  # replace with your key
+LOG_FILE = "access.log"
 
-# -------------------- HELPER FUNCTIONS --------------------
+# -------------------- HELPERS --------------------
 def get_client_ip():
-    """
-    Safely get the client's real IP, even behind proxies.
-    Takes only the first IP from X-Forwarded-For
-    """
     forwarded = request.headers.get("X-Forwarded-For")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -29,145 +30,125 @@ def is_private(ip):
     except ValueError:
         return True
 
-# -------------------- MAIN PAGE --------------------
-@app.route("/")
-def index():
-    ip = get_client_ip()  # ✅ use helper function
+def log_event(data):
+    with open(LOG_FILE, "a") as f:
+        f.write(json.dumps(data) + "\n")
 
-    country = city = isp = "Private IP"
-    lat = lon = None
-    vpn = "Unknown"
+# -------------------- VISITOR --------------------
+@app.route("/visit")
+def visit():
+    ip = get_client_ip()
+
+    log = {
+        "time": str(datetime.utcnow()),
+        "ip": ip,
+        "country": None,
+        "city": None,
+        "isp": None,
+        "vpn": None,
+        "lat": None,
+        "lon": None
+    }
 
     if not is_private(ip):
         try:
             city_res = city_reader.city(ip)
             asn_res = asn_reader.asn(ip)
 
-            country = city_res.country.name or "Unknown"
-            city = city_res.city.name or "Unknown"
-            lat = city_res.location.latitude
-            lon = city_res.location.longitude
-            isp = asn_res.autonomous_system_organization or "Unknown"
-        except Exception as e:
-            print("GeoIP error:", e)
+            log["country"] = city_res.country.name
+            log["city"] = city_res.city.name
+            log["lat"] = city_res.location.latitude
+            log["lon"] = city_res.location.longitude
+            log["isp"] = asn_res.autonomous_system_organization
+        except:
+            pass
 
-        # VPN Detection
         try:
-            r = requests.get(f"https://api.ipapi.is/?q={ip}&key={VPN_API_KEY}", timeout=5)
-            data = r.json()
-            vpn = "Yes" if data.get("is_vpn") else "No"
-        except Exception as e:
-            print("VPN API error:", e)
+            r = requests.get(
+                f"https://api.ipapi.is/?q={ip}&key={VPN_API_KEY}",
+                timeout=5
+            )
+            log["vpn"] = "Yes" if r.json().get("is_vpn") else "No"
+        except:
+            log["vpn"] = "Unknown"
 
-    log = {
-        "time": str(datetime.now()),
-        "ip": ip,
-        "country": country,
-        "city": city,
-        "isp": isp,
-        "vpn": vpn
-    }
+    log_event(log)
 
-    with open("access.log", "a") as f:
-        f.write(json.dumps(log) + "\n")
-
-    return render_template_string(PAGE, **log, lat=lat, lon=lon)
+    return render_template_string(VISITOR_PAGE)
 
 # -------------------- GPS --------------------
 @app.route("/gps", methods=["POST"])
 def gps():
     data = request.json
-    lat = data["lat"]
-    lon = data["lon"]
-
-    try:
-        r = requests.get(
-            "https://nominatim.openstreetmap.org/reverse",
-            params={"lat": lat, "lon": lon, "format": "json"},
-            headers={"User-Agent": "CyberLab"},
-            timeout=5
-        )
-        address = r.json().get("display_name", "Unknown")
-    except:
-        address = "Unknown"
-
-    return jsonify({
-        "address": address,
-        "lat": lat,
-        "lon": lon
+    log_event({
+        "time": str(datetime.utcnow()),
+        "gps_lat": data.get("lat"),
+        "gps_lon": data.get("lon")
     })
+    return jsonify({"status": "ok"})
 
-# -------------------- ADMIN DASHBOARD --------------------
+# -------------------- ADMIN --------------------
 @app.route("/admin")
 def admin():
-    logs = []
-    try:
-        with open("access.log") as f:
-            logs = [json.loads(line) for line in f.readlines()]
-    except:
-        pass
+    if request.headers.get("X-ADMIN-TOKEN") != ADMIN_TOKEN:
+        abort(403)
 
-    return render_template_string(ADMIN, logs=logs[::-1])
+    logs = []
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE) as f:
+            logs = [json.loads(line) for line in f.readlines()]
+
+    return render_template_string(ADMIN_PAGE, logs=logs[::-1])
 
 # -------------------- HTML --------------------
-PAGE = """
+VISITOR_PAGE = """
 <!DOCTYPE html>
 <html>
-<head>
-<title>Cybersecurity Lab</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
-<style>#map{height:400px}</style>
-</head>
+<head><title>Welcome</title></head>
 <body>
 
-<h2>Visitor Info</h2>
-<p><b>IP:</b> {{ ip }}</p>
-<p><b>Country:</b> {{ country }}</p>
-<p><b>City:</b> {{ city }}</p>
-<p><b>ISP:</b> {{ isp }}</p>
-<p><b>VPN:</b> {{ vpn }}</p>
+<h3>Welcome</h3>
 
-<h3>Map</h3>
-<div id="map"></div>
-
-<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script>
-let map = L.map('map').setView([{{ lat or 0 }}, {{ lon or 0 }}], 5);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
-
-{% if lat and lon %}
-L.marker([{{ lat }}, {{ lon }}]).addTo(map)
- .bindPopup("IP-based location").openPopup();
-{% endif %}
-
 navigator.geolocation.getCurrentPosition(pos => {
  fetch("/gps", {
-   method:"POST",
-   headers:{"Content-Type":"application/json"},
-   body:JSON.stringify({
-     lat:pos.coords.latitude,
-     lon:pos.coords.longitude
+   method: "POST",
+   headers: {"Content-Type":"application/json"},
+   body: JSON.stringify({
+     lat: pos.coords.latitude,
+     lon: pos.coords.longitude
    })
- })
- .then(r=>r.json())
- .then(d=>{
-   L.marker([d.lat,d.lon]).addTo(map)
-     .bindPopup("GPS location").openPopup();
  });
 });
 </script>
 
-<p><a href="/admin">Admin Dashboard</a></p>
 </body>
 </html>
 """
 
-ADMIN = """
+ADMIN_PAGE = """
+<!DOCTYPE html>
+<html>
+<head>
+<title>Admin</title>
+<link rel="stylesheet"
+ href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+#map{height:500px}
+table{border-collapse:collapse;width:100%}
+td,th{border:1px solid #ccc;padding:6px}
+</style>
+</head>
+
+<body>
 <h2>Admin Dashboard</h2>
-<table border="1">
+<div id="map"></div>
+
+<table>
 <tr>
-<th>Time</th><th>IP</th><th>Country</th>
-<th>City</th><th>ISP</th><th>VPN</th>
+<th>Time</th><th>IP</th><th>Country</th><th>City</th>
+<th>ISP</th><th>VPN</th><th>Lat</th><th>Lon</th>
 </tr>
 {% for l in logs %}
 <tr>
@@ -177,10 +158,29 @@ ADMIN = """
 <td>{{ l.city }}</td>
 <td>{{ l.isp }}</td>
 <td>{{ l.vpn }}</td>
+<td>{{ l.lat }}</td>
+<td>{{ l.lon }}</td>
 </tr>
 {% endfor %}
 </table>
+
+<script>
+const map = L.map('map').setView([0,0], 2);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+
+{% for l in logs %}
+{% if l.lat and l.lon %}
+L.marker([{{ l.lat }}, {{ l.lon }}])
+.addTo(map)
+.bindPopup("{{ l.ip }}<br>{{ l.city }}, {{ l.country }}");
+{% endif %}
+{% endfor %}
+</script>
+
+</body>
+</html>
 """
 
+# -------------------- RUN --------------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000)
